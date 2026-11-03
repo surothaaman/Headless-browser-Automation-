@@ -1,0 +1,31 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Database
+*.db
+*.sqlite3
+
+# Playwright
+playwright/.auth/
+test-results/
+playwright-report/
+
+# IDE
+.vscode/
+.idea/
+
+# Python testing
+.pytest_cache/
+.coverage
