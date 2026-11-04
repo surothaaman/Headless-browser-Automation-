@@ -29,3 +29,7 @@ playwright-report/
 # Python testing
 .pytest_cache/
 .coverage
+# SQLite database
+*.db
+*.db-shm
+*.db-wal
