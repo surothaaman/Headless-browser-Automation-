@@ -1,4 +1,3 @@
-
 from datetime import date
 from typing import Literal
 
@@ -25,11 +24,12 @@ class AddressInfo(BaseModel):
     city: str = Field(min_length=1)
     state: str = Field(min_length=1)
 
-    dwelling_type: Literal[
-        "apartment", "condo", "duplex", "house", "mobile_home"
-    ] | None = None
+    dwelling_type: (
+        Literal["apartment", "condo", "duplex", "house", "mobile_home"] | None
+    ) = None
 
     ownership: Literal["own", "rent"] | None = None
+
     moving: bool = False
     moving_date: date | None = None
 
@@ -42,6 +42,7 @@ class AddressInfo(BaseModel):
 
 class QualificationInfo(BaseModel):
     customer_type: Literal["new", "transfer"] | None = None
+
     current_providers: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -55,42 +56,48 @@ class QualificationInfo(BaseModel):
 
 class ProductInfo(BaseModel):
     provider: str = "Provider XX"
+
     internet_speed: str = Field(min_length=1)
     internet_plan_name: str | None = None
     pricing_term: str | None = None
+
     tv: bool = False
     mobile: bool = False
     home_phone: bool = False
+
     video_plan: str | None = None
     phone_plan: str | None = None
 
-    equipment_choice: Literal[
-        "leased_gateway", "own_equipment"
-    ] | None = None
+    equipment_choice: Literal["leased_gateway", "own_equipment"] | None = None
 
     now_tv: bool = False
 
-    broadband_facts_option: Literal[
-        "requested", "not_requested"
-    ] | None = None
+    broadband_facts_option: Literal["requested", "not_requested"] | None = None
 
     broadband_facts_read: bool = False
 
 
 class AccountHolderInfo(BaseModel):
     account_holder_name: str = Field(min_length=1)
+
     speaking_to_account_holder: bool
+
     first_name: str = Field(min_length=1)
     middle_initial: str | None = None
     last_name: str = Field(min_length=1)
+
     prefix: str | None = None
     suffix: str | None = None
+
     phone: str = Field(min_length=5)
     email: EmailStr
+
     is_current_customer: bool
     ez_enroll: bool
     automatic_payment_paperless: bool
+
     disclosure_read: bool
+
     mailing_same_as_service: bool
     shipping_same_as_service: bool
 
@@ -102,9 +109,7 @@ class InstallationInfo(BaseModel):
 
     install_date: date | None = None
 
-    preferred_time: Literal[
-        "morning", "afternoon", "evening"
-    ] | None = None
+    preferred_time: Literal["morning", "afternoon", "evening"] | None = None
 
     age_18_acknowledged: bool = False
     installation_schedule_read: bool = False
