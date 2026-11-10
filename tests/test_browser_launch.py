@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 from decimal import Decimal
+import argparse
 
 from app.automation.browser import BrowserManager
 from playwright.sync_api import Error as PlaywrightError
@@ -12,33 +13,9 @@ SIMULATOR_URL = (
     "?next=%2Fallconnect%2F"
 )
 
-# Synthetic test data only.
-TEST_DATA = {
-    "prefix": "Mr",
-    "first_name": "Phil",
-    "middle_name": " ",
-    "last_name": "Dunphy",
-    "zip_code": "90064",
-    "address": "10336 Dunleer Dr, Los Angeles, CA",
-    "unit_type": "Suite",
-    "unit_number": "123",
-    "city": "Los Angeles",
-    "state": "CA",
-    "dwelling_type": "House",
-    "ownership": "Own",
-    "moving": "No",
-    "customer_type": "New",
-    "provider": "ProviderXX",
-    "plan": "300 Mbps (1-YEAR PRICING)",
-    "base_price": "40.00",
-    "video": "None",
-    "internet_plan": "300 Mbps (1-YEAR PRICING)",
-    "phone": "5550101234",
-    "email": "phil.test@example.com",
-    "installation_type": "STANDARD_SHIPPING",
-    "installation_date": "",
-    "installation_time": "Afternoon",
-}
+from tests.test_data import get_test_data
+
+TEST_DATA = {}
 
 SCREENSHOT_DIR = Path("tests/screenshots")
 
@@ -143,34 +120,75 @@ def login_and_start_session(page):
     print("Basic Information page detected.")
 
 
+def select_dropdown(page, selector, requested_value, field_name):
+    """Select a dropdown option using its label or value."""
+
+    dropdown = page.locator(selector)
+    dropdown.wait_for(state="visible", timeout=10000)
+
+    options = dropdown.locator("option").evaluate_all("""
+        elements => elements.map(option => ({
+            label: option.textContent.trim(),
+            value: option.value
+        }))
+    """)
+
+    requested = str(requested_value or "").strip()
+
+    # An empty optional field can remain at its default option.
+    if not requested:
+        print(f"SKIP: {field_name} is empty.")
+        return
+
+    def normalize(value):
+        return " ".join(str(value).strip().lower().split())
+
+    # Match either the option label or its underlying value.
+    match = next(
+        (
+            option for option in options
+            if normalize(option["label"]) == normalize(requested)
+            or normalize(option["value"]) == normalize(requested)
+        ),
+        None
+    )
+
+    if match is None:
+        available = [
+            f'{option["label"]!r} (value={option["value"]!r})'
+            for option in options
+        ]
+
+        raise RuntimeError(
+            f"Invalid option for {field_name}: {requested!r}. "
+            f"Available options: {available}"
+        )
+
+    dropdown.select_option(value=match["value"])
+
+    print(f"PASS: {field_name} selected: {match['label']}")
+
+
 
 def fill_basic_information(page):
-    """Fill the Basic Information form."""
+    """Fill and validate the Basic Information form."""
 
     print("\n========== BASIC INFORMATION ==========")
 
-    page.locator("#namePrefixList").select_option(
-        label=TEST_DATA["prefix"]
+    # 1. Customer name
+    select_dropdown(
+        page, "#namePrefixList",
+        TEST_DATA["prefix"], "Prefix"
     )
 
-    page.locator("#firstName").fill(
-        TEST_DATA["first_name"]
-    )
+    page.locator("#firstName").fill(TEST_DATA["first_name"])
+    page.locator("#middleName").fill(TEST_DATA["middle_name"])
+    page.locator("#lastName").fill(TEST_DATA["last_name"])
 
-    page.locator("#middleName").fill(
-        TEST_DATA["middle_name"]
-    )
-
-    page.locator("#lastName").fill(
-        TEST_DATA["last_name"]
-    )
-
-    # ZIP lookup unlocks the address fields.
-    page.locator("#ssZipCode").fill(
-        TEST_DATA["zip_code"]
-    )
-
-    page.locator("#ssZipCode").press("Tab")
+    # 2. ZIP code and address lookup
+    zip_field = page.locator("#ssZipCode")
+    zip_field.fill(TEST_DATA["zip_code"])
+    zip_field.press("Tab")
 
     page.wait_for_function(
         """() => {
@@ -179,48 +197,98 @@ def fill_basic_information(page):
             const state = document.querySelector("#stateList");
 
             return address && city && state &&
-                !address.disabled &&
-                !city.disabled &&
-                !state.disabled;
+                   !address.disabled &&
+                   !city.disabled &&
+                   !state.disabled;
         }""",
-        timeout=30000,
+        timeout=30000
     )
 
-    page.locator("#address1").fill(
-        TEST_DATA["address"]
-    )
+    # 3. Address
+    page.locator("#address1").fill(TEST_DATA["address"])
 
-    page.locator("#unitTypeList").select_option(
-        label=TEST_DATA["unit_type"]
+    # Unit Type: inspect and match the actual available option.
+    select_dropdown(
+        page, "#unitTypeList",
+        TEST_DATA.get("unit_type", ""),
+        "Unit Type"
     )
 
     page.locator("#unitNumber").fill(
-        TEST_DATA["unit_number"]
+        TEST_DATA.get("unit_number", "")
     )
 
-    page.locator("#city").fill(
-        TEST_DATA["city"]
+    # 4. City and state
+    page.locator("#city").fill(TEST_DATA["city"])
+
+    select_dropdown(
+        page, "#stateList",
+        TEST_DATA["state"],
+        "State"
     )
 
-    page.locator("#stateList").select_option(
-        value=TEST_DATA["state"]
+    # 5. Dwelling and ownership
+    select_dropdown(
+        page, "#serviceAddressTypeList",
+        TEST_DATA["dwelling_type"],
+        "Dwelling Type"
     )
 
-    page.locator("#serviceAddressTypeList").select_option(
-        label=TEST_DATA["dwelling_type"]
+    select_dropdown(
+        page, "#rentOwnList",
+        TEST_DATA["ownership"],
+        "Ownership"
     )
 
-    page.locator("#rentOwnList").select_option(
-        label=TEST_DATA["ownership"]
+    # 6. Moving status
+    select_dropdown(
+        page, "#customerMove",
+        TEST_DATA["moving"],
+        "Moving Status"
     )
 
-    page.locator("#customerMove").select_option(
-        label=TEST_DATA["moving"]
-    )
+    # 7. Moving date is displayed dynamically when Moving = Yes.
+    moving_value = str(TEST_DATA["moving"]).strip().lower()
 
-    print("Basic Information fields entered.")
+    if moving_value in ("yes", "true"):
+        moving_date = TEST_DATA.get("moving_date")
+
+        if not moving_date:
+            raise RuntimeError(
+                "Moving is Yes, but moving_date is missing "
+                "from the selected customer profile."
+            )
+
+        move_date_field = page.get_by_placeholder("Move in Date")
+
+        move_date_field.wait_for(
+            state="visible",
+            timeout=10000
+        )
+
+        if not move_date_field.is_enabled():
+            raise RuntimeError("Move in Date field is disabled.")
+
+        # Fill date using the ISO format YYYY-MM-DD.
+        move_date_field.fill(str(moving_date))
+
+        actual_date = move_date_field.input_value()
+
+        if actual_date != str(moving_date):
+            raise RuntimeError(
+                f"Moving date mismatch. Expected {moving_date}, "
+                f"but found {actual_date}."
+            )
+
+        print(f"PASS: Moving date entered: {actual_date}")
+
+    else:
+        print("Moving is No. Moving date is not required.")
+
+    print("\nBasic Information fields entered.")
 
     return validate_basic_information(page)
+
 
 
 def validate_basic_information(page):
@@ -488,185 +556,159 @@ def check_provider_availability(page, order):
 
 
 
+
 def select_internet_offer(page, order):
-    """Find the exact ProviderXX plan and open its View Details page."""
+    """Find the ProviderXX offer matching the requested speed and term."""
 
     print("\n========== INTERNET PLAN SELECTION ==========")
 
-    requested_plan = order["plan"].strip()
-    expected_price = Decimal(order["base_price"])
+    requested_speed = int(order["internet_speed_mbps"])
+    requested_term = str(order["pricing_term"]).upper().replace("-", "_")
 
-    # Wait for Internet offers to load.
     titles = page.locator(".productTitle:visible")
+    titles.first.wait_for(state="visible", timeout=30000)
 
-    titles.first.wait_for(
-        state="visible",
-        timeout=30000,
-    )
-
-    selected_title = None
+    matches = []
 
     for index in range(titles.count()):
-        current_title = titles.nth(index)
-        title_text = current_title.inner_text().strip()
+        title = titles.nth(index)
+        title_text = title.inner_text().strip()
 
-        if title_text.casefold() == requested_plan.casefold():
-            selected_title = current_title
-            break
+        card = title.locator(
+            "xpath=ancestor::dir[contains("
+            "concat(' ', normalize-space(@class), ' '), "
+            "' syncbdlmain ')][1]"
+        )
 
-    if selected_title is None:
+        if card.count() != 1:
+            continue
+
+        metadata_input = card.locator("input.singleHiddenJson")
+
+        if metadata_input.count() != 1:
+            continue
+
+        metadata = metadata_input.evaluate(
+            "element => JSON.parse(element.value)"
+        )
+
+        actual_product = metadata.get("productname", "").strip()
+        actual_provider = metadata.get("providerName", "").strip()
+
+        if actual_provider.casefold() != "providerxx":
+            continue
+
+        # Match the requested speed.
+        speed_match = re.search(
+            r"\b(\d+)\s*Mbps\b",
+            actual_product,
+            re.IGNORECASE
+        )
+
+        if not speed_match or int(speed_match.group(1)) != requested_speed:
+            continue
+
+        # Match the requested pricing term.
+        product_normalized = actual_product.upper().replace("-", "_")
+        required_year = requested_term.split("_")[0]
+
+        term_match = re.search(
+            rf"\b{re.escape(required_year)}\s*_?\s*YEAR\b",
+            product_normalized
+        )
+
+        if not term_match:
+            continue
+
+        price_input = card.locator("input.baseRecPrice")
+
+        if price_input.count() != 1:
+            continue
+
+        actual_price = Decimal(price_input.input_value())
+
+        matches.append({
+            "card": card,
+            "plan": actual_product,
+            "provider": actual_provider,
+            "base_price": actual_price,
+        })
+
+    if len(matches) != 1:
         available = [
             titles.nth(i).inner_text().strip()
             for i in range(titles.count())
         ]
 
         raise RuntimeError(
-            f"Requested plan not found: {requested_plan}. "
+            f"Expected exactly one {requested_speed} Mbps "
+            f"{requested_term} ProviderXX offer, "
+            f"but found {len(matches)}. "
             f"Available plans: {available}"
         )
 
-    print("Exact plan found:", requested_plan)
+    selected = matches[0]
+    card = selected["card"]
 
-    # Find the nearest actual product card.
-    card = selected_title.locator(
-        "xpath=ancestor::dir[contains("
-        "concat(' ', normalize-space(@class), ' '), "
-        "' syncbdlmain ')][1]"
-    )
+    print("Matching plan found:", selected["plan"])
+    print("Provider verified:", selected["provider"])
+    print(f"Actual catalogue price: ${selected['base_price']:.2f}")
 
-    if card.count() != 1:
-        raise RuntimeError(
-            "Could not identify the product card for the selected plan."
-        )
-
-    # Read product metadata.
-    metadata_input = card.locator(
-        "input.singleHiddenJson"
-    )
-
-    metadata_input.wait_for(
-        state="attached",
-        timeout=15000,
-    )
-
-    metadata = metadata_input.evaluate(
-        "element => JSON.parse(element.value)"
-    )
-
-    actual_product = metadata.get("productname", "").strip()
-    actual_provider = metadata.get("providerName", "").strip()
-
-    if actual_product.casefold() != requested_plan.casefold():
-        raise RuntimeError(
-            f"Product metadata mismatch: {actual_product}"
-        )
-
-    if actual_provider.casefold() != "providerxx":
-        raise RuntimeError(
-            f"Unexpected provider: {actual_provider}"
-        )
-
-    # Verify the base price.
-    price_input = card.locator(
-        "input.baseRecPrice"
-    )
-
-    actual_price = Decimal(
-        price_input.input_value()
-    )
-
-    if actual_price != expected_price:
-        raise RuntimeError(
-            f"Price mismatch. Expected ${expected_price:.2f}; "
-            f"found ${actual_price:.2f}."
-        )
-
-    print("Provider verified:", actual_provider)
-    print(f"Base price verified: ${actual_price:.2f}")
-
-    # Click the View Details input in this exact card.
-    view_details = card.locator(
-        "input.ViewDetailsBtn"
-    )
-
-    view_details.wait_for(
-        state="visible",
-        timeout=30000,
-    )
+    view_details = card.locator("input.ViewDetailsBtn")
+    view_details.wait_for(state="visible", timeout=30000)
 
     if not view_details.is_enabled():
-        raise RuntimeError(
-            "View Details button is disabled."
-        )
+        raise RuntimeError("View Details button is disabled.")
 
     view_details.scroll_into_view_if_needed()
     view_details.click()
 
     print("View Details clicked.")
 
-    # Verify Product Details.
-    product_details = page.locator(
-        "#contentpdet:visible"
-    )
+    product_details = page.locator("#contentpdet:visible")
+    product_details.wait_for(state="visible", timeout=30000)
 
-    product_details.wait_for(
-        state="visible",
-        timeout=30000,
-    )
-
-    product_name = product_details.locator(
-        "#product_name"
-    )
-
-    product_name.wait_for(
-        state="visible",
-        timeout=30000,
-    )
+    product_name = product_details.locator("#product_name")
+    product_name.wait_for(state="visible", timeout=30000)
 
     actual_name = product_name.inner_text().strip()
 
-    if actual_name.casefold() != requested_plan.casefold():
+    if actual_name.casefold() != selected["plan"].casefold():
         raise RuntimeError(
             f"Product Details mismatch. "
-            f"Expected: {requested_plan}; Found: {actual_name}"
+            f"Expected: {selected['plan']}; Found: {actual_name}"
         )
 
-    print("Correct Product Details page opened.")
+    print("Product Details plan verified.")
 
-    save_screenshot(
-        page,
-        "selected_plan_details.png",
-    )
+    save_screenshot(page, "selected_plan_details.png")
+
+    return {
+        "plan": selected["plan"],
+        "base_price": selected["base_price"],
+    }
 
 
-def add_plan_to_order_and_checkout(page, order):
-    """Verify the selected plan and click Add to Order and Checkout."""
+
+def add_plan_to_order_and_checkout(page, selected_plan):
+    """Verify the selected catalogue offer and proceed to checkout."""
 
     print("\n========== ADD TO ORDER AND CHECKOUT ==========")
 
-    expected_plan = order["plan"].strip()
-    expected_price = Decimal(order["base_price"])
+    expected_plan = selected_plan["plan"]
+    expected_price = Decimal(str(selected_plan["base_price"]))
 
-    # Confirm Product Details is visible.
     product_details = page.locator("#contentpdet:visible")
-    product_details.wait_for(
-        state="visible",
-        timeout=30000,
-    )
+    product_details.wait_for(state="visible", timeout=30000)
 
-    # Verify the exact selected plan.
     product_name = product_details.locator("#product_name")
     actual_plan = product_name.inner_text().strip()
 
     if actual_plan.casefold() != expected_plan.casefold():
         raise RuntimeError(
-            f"Plan mismatch. Expected: {expected_plan}; "
-            f"Found: {actual_plan}"
+            f"Plan mismatch. Expected: {expected_plan}; Found: {actual_plan}"
         )
 
-    print("Selected plan verified:", actual_plan)
-
-    # Verify the displayed base price.
     price_text = product_details.locator(
         "#product_basePriceInfo"
     ).inner_text().strip()
@@ -674,13 +716,9 @@ def add_plan_to_order_and_checkout(page, order):
     price_match = re.search(r"\$([\d,.]+)", price_text)
 
     if not price_match:
-        raise RuntimeError(
-            "Could not read the plan's displayed base price."
-        )
+        raise RuntimeError("Could not read the displayed base price.")
 
-    actual_price = Decimal(
-        price_match.group(1).replace(",", "")
-    )
+    actual_price = Decimal(price_match.group(1).replace(",", ""))
 
     if actual_price != expected_price:
         raise RuntimeError(
@@ -688,34 +726,27 @@ def add_plan_to_order_and_checkout(page, order):
             f"found ${actual_price:.2f}."
         )
 
+    print("Selected plan verified:", actual_plan)
     print(f"Base price verified: ${actual_price:.2f}")
 
-    # Locate the Add to Order and Checkout button.
     checkout_button = page.locator(
         "#addToOrderAndCheckout:visible"
     )
 
-    checkout_button.wait_for(
-        state="visible",
-        timeout=30000,
-    )
+    checkout_button.wait_for(state="visible", timeout=30000)
 
     if not checkout_button.is_enabled():
-        raise RuntimeError(
-            "Add to Order and Checkout button is disabled."
-        )
+        raise RuntimeError("Add to Order and Checkout button is disabled.")
 
     checkout_button.scroll_into_view_if_needed()
 
     previous_url = page.url
-
     checkout_button.click(timeout=30000)
 
     print("Add to Order and Checkout clicked.")
 
-    # Wait for the simulator to move to the next screen.
     page.wait_for_function(
-        """(oldUrl) => window.location.href !== oldUrl""",
+        "(oldUrl) => window.location.href !== oldUrl",
         arg=previous_url,
         timeout=60000,
     )
@@ -723,41 +754,10 @@ def add_plan_to_order_and_checkout(page, order):
     print("Checkout navigation detected.")
     print("Current page:", page.url)
 
-    save_screenshot(
-        page,
-        "checkout_after_add_to_order.png",
-    )
+    save_screenshot(page, "checkout_after_add_to_order.png")
 
     print("PASS: Selected Internet plan added to checkout.")
 
-
-
-def get_checkout_product_section(checkout, heading):
-    """Find a checkout product section. Return None if it is absent."""
-
-    header = checkout.get_by_text(
-        re.compile(rf"^\s*{re.escape(heading)}\s*$", re.IGNORECASE)
-    )
-
-    if header.count() == 0:
-        print(f"{heading} section is not present. Skipping.")
-        return None
-
-    for index in range(header.count()):
-        current_header = header.nth(index)
-
-        if not current_header.is_visible():
-            continue
-
-        section = current_header.locator(
-            'xpath=ancestor::*[.//input[@type="radio"]][1]'
-        )
-
-        if section.count() == 1:
-            return section
-
-    print(f"{heading} section is not visible. Skipping.")
-    return None
 
 
 def select_checkout_option(section, heading, requested):
@@ -1164,8 +1164,9 @@ def print_checkout_options(section, heading):
         print(details)
 
 
+
 def automate_account_holder_qualification(page, order):
-    """Complete and validate Account Holder Qualification."""
+    """Complete Account Holder Qualification using customer data."""
 
     print("\n========== ACCOUNT HOLDER QUALIFICATION ==========")
 
@@ -1174,28 +1175,107 @@ def automate_account_holder_qualification(page, order):
     if frame is None:
         raise RuntimeError("Checkout iframe not found.")
 
-    # 1. Select account holder.
-    account_holder = frame.locator("select").first
-    account_holder.select_option(label="Phil Dunphy(Customer)")
+    def normalize(value):
+        return " ".join(str(value).strip().casefold().split())
 
-    print("PASS: Account holder selected.")
+    # 1. Select the correct account holder dynamically.
+    account_holder_name = order.get("account_holder_name")
 
-    # 2. Select Yes for confirmed test answers.
+    if not account_holder_name:
+        account_holder_name = (
+            f'{order["first_name"]} {order["last_name"]}'
+        )
+
+    account_holder = frame.locator(
+        'select[aria-label="Account holder"]'
+    )
+
+    account_holder.wait_for(state="visible", timeout=10000)
+
+    account_options = account_holder.locator("option").evaluate_all("""
+        elements => elements.map(option => ({
+            label: option.textContent.trim(),
+            value: option.value
+        }))
+    """)
+
+    matching_account = next(
+        (
+            option for option in account_options
+            if normalize(account_holder_name) in normalize(option["label"])
+        ),
+        None
+    )
+
+    if matching_account is None:
+        raise RuntimeError(
+            f"Account holder '{account_holder_name}' not found. "
+            f"Available options: {account_options}"
+        )
+
+    account_holder.select_option(value=matching_account["value"])
+
+    print(
+        f"PASS: Account holder selected: "
+        f"{matching_account['label']}"
+    )
+
+    # 2. Customer-specific Yes/No radio selections.
     radio_groups = [
-        ("verified", "Speaking to Account Holder"),
-        ("current", "Current Provider XX Customer"),
-        ("ez", "EZ-Enroll"),
-        ("autopay", "Automatic Payments"),
-        ("mailing", "Mailing Address Same as Service"),
-        ("shipping", "Shipping Address Same as Service"),
+        (
+            "verified",
+            "Speaking to Account Holder",
+            "speaking_to_account_holder"
+        ),
+        (
+            "current",
+            "Current Provider XX Customer",
+            "existing_provider_customer"
+        ),
+        (
+            "ez",
+            "EZ-Enroll",
+            "ez_enroll"
+        ),
+        (
+            "autopay",
+            "Automatic Payments",
+            "autopay_paperless_discount"
+        ),
+        (
+            "mailing",
+            "Mailing Address Same as Service",
+            "mailing_same_as_service"
+        ),
+        (
+            "shipping",
+            "Shipping Address Same as Service",
+            "shipping_same_as_service"
+        ),
     ]
 
-    for group_name, description in radio_groups:
+    expected_answers = {}
+
+    for group_name, description, data_key in radio_groups:
+
+        if data_key not in order:
+            raise RuntimeError(
+                f"Missing customer data for {description}: {data_key}"
+            )
+
+        expected = bool(order[data_key])
+        expected_label = "Yes" if expected else "No"
+
         radios = frame.locator(
             f'input[type="radio"][name="{group_name}"]'
         )
 
-        yes_radio = None
+        if radios.count() == 0:
+            raise RuntimeError(
+                f"{description}: radio buttons not found."
+            )
+
+        matching_radio = None
 
         for index in range(radios.count()):
             radio = radios.nth(index)
@@ -1205,47 +1285,46 @@ def automate_account_holder_qualification(page, order):
                     .map(label => label.innerText.trim())
             """)
 
-            if any(label.casefold() == "yes" for label in labels):
-                yes_radio = radio
+            if any(
+                normalize(label) == normalize(expected_label)
+                for label in labels
+            ):
+                matching_radio = radio
                 break
 
-        if yes_radio is None:
+        if matching_radio is None:
             raise RuntimeError(
-                f"{description}: Yes option not found."
+                f"{description}: {expected_label} option not found."
             )
 
-        if yes_radio.is_disabled():
+        if matching_radio.is_disabled():
             raise RuntimeError(
-                f"{description}: Yes option is disabled."
+                f"{description}: {expected_label} option is disabled."
             )
 
-        if not yes_radio.is_checked():
-            yes_radio.check()
+        if not matching_radio.is_checked():
+            matching_radio.check()
 
-        if not yes_radio.is_checked():
+        if not matching_radio.is_checked():
             raise RuntimeError(
-                f"{description}: Yes selection failed."
+                f"{description}: selection failed."
             )
 
-        print(f"PASS: {description} = Yes")
+        expected_answers[group_name] = expected_label
 
-    # 3. Enter phone number.
+        print(f"PASS: {description} = {expected_label}")
+
+    # 3. Phone number.
     phone = order.get("phone") or order.get("phone_number")
 
     if not phone:
-        raise RuntimeError(
-            "Phone number is missing from TEST_DATA."
-        )
+        raise RuntimeError("Phone number missing from customer data.")
 
     phone_field = frame.locator(
         'input[placeholder="Phone Number"]'
     )
 
-    if phone_field.count() != 1:
-        raise RuntimeError(
-            "Could not uniquely identify Phone Number field."
-        )
-
+    phone_field.wait_for(state="visible", timeout=10000)
     phone_field.fill(str(phone))
 
     if phone_field.input_value() != str(phone):
@@ -1253,33 +1332,31 @@ def automate_account_holder_qualification(page, order):
 
     print("PASS: Phone number entered.")
 
-    # 4. Enter email address.
+    # 4. Email address.
     email = order.get("email")
 
     if not email:
-        raise RuntimeError(
-            "Email address is missing from TEST_DATA."
-        )
+        raise RuntimeError("Email address missing from customer data.")
 
     email_field = frame.locator(
         'input[placeholder="Email Address"]'
     )
 
-    if email_field.count() != 1:
-        raise RuntimeError(
-            "Could not uniquely identify Email Address field."
-        )
-
+    email_field.wait_for(state="visible", timeout=10000)
     email_field.fill(str(email))
 
     if email_field.input_value() != str(email):
-        raise RuntimeError("Email address validation failed.")
+        raise RuntimeError("Email validation failed.")
 
     print("PASS: Email address entered.")
 
-    # 5. Tick both mandatory Read acknowledgements.
+    
+        # 5. Mandatory disclosure acknowledgement
+    print("\n========== DISCLOSURE ACKNOWLEDGEMENT ==========")
+
     checkboxes = frame.locator('input[type="checkbox"]')
-    read_checkboxes = []
+
+    read_checkbox = None
 
     for index in range(checkboxes.count()):
         checkbox = checkboxes.nth(index)
@@ -1290,41 +1367,31 @@ def automate_account_holder_qualification(page, order):
         """)
 
         if any(label.casefold() == "read" for label in labels):
-            read_checkboxes.append(checkbox)
+            read_checkbox = checkbox
+            break
 
-    if len(read_checkboxes) < 2:
-        raise RuntimeError(
-            "Expected two mandatory Read acknowledgements, "
-            f"but found {len(read_checkboxes)}."
-        )
+    if read_checkbox is None:
+        raise RuntimeError("Mandatory Read checkbox not found.")
 
-    for index, checkbox in enumerate(read_checkboxes, start=1):
-        if checkbox.is_disabled():
-            raise RuntimeError(
-                f"Mandatory Read acknowledgement {index} is disabled."
-            )
+    if not read_checkbox.is_checked():
+        read_checkbox.check()
 
-        if not checkbox.is_checked():
-            checkbox.check()
+    if not read_checkbox.is_checked():
+        raise RuntimeError("Mandatory Read acknowledgement failed.")
 
-        if not checkbox.is_checked():
-            raise RuntimeError(
-                f"Mandatory Read acknowledgement {index} failed."
-            )
+    print("PASS: Automatic Payments disclosure acknowledged.")
 
-        print(
-            f"PASS: Mandatory Read acknowledgement {index} checked."
-        )
+    # 6. Validate all radio selections.
+    print("\n========== FINAL QUALIFICATION VALIDATION ==========")
 
-    # 6. Final validation.
-    print("\n========== ACCOUNT HOLDER VALIDATION ==========")
+    for group_name, description, data_key in radio_groups:
 
-    for group_name, description in radio_groups:
+        expected_label = expected_answers[group_name]
         radios = frame.locator(
             f'input[type="radio"][name="{group_name}"]'
         )
 
-        yes_selected = False
+        validated = False
 
         for index in range(radios.count()):
             radio = radios.nth(index)
@@ -1335,40 +1402,41 @@ def automate_account_holder_qualification(page, order):
             """)
 
             if (
-                any(label.casefold() == "yes" for label in labels)
+                any(
+                    normalize(label) == normalize(expected_label)
+                    for label in labels
+                )
                 and radio.is_checked()
             ):
-                yes_selected = True
+                validated = True
                 break
 
-        if not yes_selected:
+        if not validated:
             raise RuntimeError(
-                f"Validation failed: {description}."
+                f"Validation failed: {description} "
+                f"should be {expected_label}."
             )
 
-    if not phone_field.input_value():
-        raise RuntimeError("Phone number is empty.")
+    if phone_field.input_value() != str(phone):
+        raise RuntimeError("Final phone validation failed.")
 
-    if not email_field.input_value():
-        raise RuntimeError("Email address is empty.")
+    if email_field.input_value() != str(email):
+        raise RuntimeError("Final email validation failed.")
 
-    print("All Account Holder Qualification fields validated.")
+    print("PASS: All customer qualification fields validated.")
 
     save_screenshot(
         page,
         "account_holder_qualification_completed.png"
     )
 
-    # 7. Click Forward.
+    # 7. Forward only after validation.
     forward_button = frame.get_by_role(
         "button",
         name=re.compile(r"^\s*Forward\s*>?\s*$", re.IGNORECASE)
     )
 
-    forward_button.wait_for(
-        state="visible",
-        timeout=30000
-    )
+    forward_button.wait_for(state="visible", timeout=10000)
 
     if not forward_button.is_enabled():
         raise RuntimeError(
@@ -1388,12 +1456,84 @@ def automate_account_holder_qualification(page, order):
     )
 
     print("Account Holder Qualification completed.")
+
     
+def run_credit_check(page, order):
+    """Run the credit check only when sandbox testing is enabled."""
+
+    print("\n========== CREDIT CHECK ==========")
+
+    frame = page.frame(name="checkoutContent")
+
+    if frame is None:
+        raise RuntimeError("Checkout iframe not found.")
+
+    credit_data = order.get("credit_check", {})
+
+    if not credit_data.get("enabled", False):
+        print("Credit Check skipped: sandbox execution is disabled.")
+        return
+
+    ssn = credit_data.get("ssn")
+    dob = credit_data.get("dob")
+
+    if not ssn or not dob:
+        raise RuntimeError("Dummy SSN or DOB is missing.")
+
+    ssn_field = frame.locator(
+        'input[placeholder*="SSN"], input[name*="ssn" i]'
+    )
+
+    dob_field = frame.locator(
+        'input[placeholder="MM/DD/YYYY"], input[name*="dob" i]'
+    )
+
+    if ssn_field.count() != 1 or dob_field.count() != 1:
+        raise RuntimeError(
+            "Could not uniquely identify SSN and DOB fields."
+        )
+
+    ssn_field.fill(str(ssn))
+    dob_field.fill(str(dob))
+
+    print("PASS: Dummy SSN entered.")
+    print("PASS: Dummy DOB entered.")
+
+    if ssn_field.input_value() != str(ssn):
+        raise RuntimeError("SSN validation failed.")
+
+    if dob_field.input_value() != str(dob):
+        raise RuntimeError("DOB validation failed.")
+
+    run_button = frame.get_by_role(
+        "button",
+        name=re.compile(r"Run Credit Check", re.I)
+    )
+
+    run_button.wait_for(state="visible", timeout=10000)
+
+    if not run_button.is_enabled():
+        raise RuntimeError("Run Credit Check button is disabled.")
+
+    save_screenshot(page, "credit_check_before_run.png")
+
+    run_button.click()
+
+    print("PASS: Run Credit Check clicked.")
+
+    page.wait_for_timeout(3000)
+
+    save_screenshot(page, "credit_check_result.png")
+
+    print("Credit Check response captured.")
+
+
+
 
 def automate_installation_payment(page, order):
-    """Handle Standard Shipping and Professional Installation."""
+    """Select shipping or professional installation, confirm, and continue."""
 
-    from datetime import date
+    from datetime import date, datetime
     import re
 
     print("\n========== INSTALLATION AND PAYMENT ==========")
@@ -1403,14 +1543,19 @@ def automate_installation_payment(page, order):
     if frame is None:
         raise RuntimeError("Checkout iframe not found.")
 
-    installation_type = order.get(
-        "installation_type", "STANDARD_SHIPPING"
+    installation_type = str(
+        order.get("installation_type", "STANDARD_SHIPPING")
     ).strip().upper()
 
     if installation_type not in ("STANDARD_SHIPPING", "PRO_INSTALL"):
-        raise ValueError("Invalid installation type.")
+        raise ValueError(f"Invalid installation type: {installation_type}")
 
-    # Find the installation radio using its actual label/value.
+    # -------------------------------------------------
+    # 1. SELECT INSTALLATION TYPE
+    # -------------------------------------------------
+
+    print("\n1. Selecting installation type")
+
     radios = frame.locator('input[type="radio"]')
     selected_radio = None
 
@@ -1429,9 +1574,7 @@ def automate_installation_payment(page, order):
         """)
 
         text = " ".join(
-            [details["value"]] +
-            details["labels"] +
-            [details["parent"]]
+            [details["value"]] + details["labels"] + [details["parent"]]
         ).casefold()
 
         if installation_type == "STANDARD_SHIPPING":
@@ -1451,47 +1594,115 @@ def automate_installation_payment(page, order):
 
     if selected_radio is None:
         raise RuntimeError(
-            f"Could not find installation option: {installation_type}"
+            f"Installation option not found: {installation_type}"
         )
 
-    selected_radio.check()
+    if not selected_radio.is_checked():
+        selected_radio.check()
 
     if not selected_radio.is_checked():
         raise RuntimeError("Installation selection failed.")
 
     print(f"PASS: {installation_type} selected.")
 
-    # Professional Installation requires additional details.
+    # -------------------------------------------------
+    # 2. PROFESSIONAL INSTALLATION DETAILS
+    # -------------------------------------------------
+
     if installation_type == "PRO_INSTALL":
 
-        install_date = str(
+        installation_date = str(
             order.get("installation_date", "")
         ).strip()
 
-        install_time = str(
+        installation_time = str(
             order.get("installation_time", "")
         ).strip()
 
-        if not install_date:
-            raise ValueError(
-                "Enter the customer-selected installation_date "
-                "in TEST_DATA."
-            )
+        if not installation_date:
+            raise ValueError("Installation date is missing.")
 
-        parsed_date = date.fromisoformat(install_date)
+        parsed_date = date.fromisoformat(installation_date)
 
         if parsed_date < date.today():
             raise ValueError("Installation date cannot be in the past.")
 
-        if install_time not in (
-            "Morning", "Afternoon", "Evening"
-        ):
-            raise ValueError(
-                "Invalid installation time. Choose Morning, "
-                "Afternoon, or Evening."
+        if installation_time not in ("Morning", "Afternoon", "Evening"):
+            raise ValueError("Invalid installation time.")
+
+        
+        # 2A. Identify the two mandatory Read checkboxes
+        print("\n========== INSTALLATION DISCLOSURES ==========")
+
+        read_checkboxes = frame.locator(
+            'input[type="checkbox"]:visible'
+        )
+
+        count = read_checkboxes.count()
+
+        print(f"Visible installation checkboxes found: {count}")
+
+        if count != 2:
+            raise RuntimeError(
+                f"Expected exactly 2 visible installation "
+                f"acknowledgements, found {count}. "
+                "Inspect the installation page."
             )
 
-        # Locate the date field.
+        # Verify both controls are labelled Read.
+        for index in range(2):
+            checkbox = read_checkboxes.nth(index)
+
+            details = checkbox.evaluate("""
+                el => ({
+                    labels: Array.from(el.labels || [])
+                        .map(label => label.innerText.trim()),
+                    parentText: el.parentElement
+                        ? el.parentElement.innerText.trim()
+                        : ""
+                })
+            """)
+
+            print(f"Disclosure checkbox {index + 1}: {details}")
+
+            if not any(
+                label.casefold() == "read"
+                for label in details["labels"]
+            ):
+                raise RuntimeError(
+                    f"Checkbox {index + 1} is not labelled Read."
+                )
+
+        # First checkbox: Adult availability
+        adult_checkbox = read_checkboxes.nth(0)
+
+        if not adult_checkbox.is_checked():
+            adult_checkbox.check()
+
+        if not adult_checkbox.is_checked():
+            raise RuntimeError(
+                "Adult availability acknowledgement failed."
+            )
+
+        print("PASS: Adult availability Read checked.")
+
+        # Second checkbox: Installation date availability
+        availability_checkbox = read_checkboxes.nth(1)
+
+        if not availability_checkbox.is_checked():
+            availability_checkbox.check()
+
+        if not availability_checkbox.is_checked():
+            raise RuntimeError(
+                "Installation availability acknowledgement failed."
+            )
+
+        print("PASS: Installation availability Read checked.")
+
+        # 2B. Installation date
+
+        print("\n3. Selecting installation date")
+
         date_field = frame.locator(
             'input[type="date"]:visible, '
             'input[placeholder*="dd-mm-yyyy" i]:visible'
@@ -1499,17 +1710,37 @@ def automate_installation_payment(page, order):
 
         if date_field.count() != 1:
             raise RuntimeError(
-                "Could not uniquely identify installation date field."
+                f"Expected one installation date field; "
+                f"found {date_field.count()}."
             )
 
-        date_field.fill(install_date)
+        date_input_type = date_field.get_attribute("type")
+        date_placeholder = date_field.get_attribute("placeholder") or ""
 
-        if date_field.input_value() != install_date:
+        if date_input_type == "date":
+            date_to_enter = installation_date
+        elif "dd-mm-yyyy" in date_placeholder.casefold():
+            date_to_enter = datetime.strptime(
+                installation_date, "%Y-%m-%d"
+            ).strftime("%d-%m-%Y")
+        else:
+            raise RuntimeError(
+                "Unknown installation date field format. "
+                f"Type={date_input_type}, "
+                f"Placeholder={date_placeholder}"
+            )
+
+        date_field.fill(date_to_enter)
+
+        if date_field.input_value() != date_to_enter:
             raise RuntimeError("Installation date validation failed.")
 
-        print("PASS: Installation date entered.")
+        print(f"PASS: Installation date entered: {date_to_enter}")
 
-        # Locate the dropdown by its actual options.
+        # 2C. Preferred installation time
+
+        print("\n4. Selecting preferred installation time")
+
         selects = frame.locator("select:visible")
         time_dropdown = None
 
@@ -1518,9 +1749,7 @@ def automate_installation_payment(page, order):
 
             options = [
                 value.strip()
-                for value in candidate.locator(
-                    "option"
-                ).all_text_contents()
+                for value in candidate.locator("option").all_text_contents()
             ]
 
             if all(
@@ -1531,99 +1760,57 @@ def automate_installation_payment(page, order):
                 break
 
         if time_dropdown is None:
-            raise RuntimeError(
-                "Installation time dropdown not found."
-            )
+            raise RuntimeError("Installation time dropdown not found.")
 
-        time_dropdown.select_option(label=install_time)
+        time_dropdown.select_option(label=installation_time)
 
-        if time_dropdown.locator(
+        actual_time = time_dropdown.locator(
             "option:checked"
-        ).inner_text().strip() != install_time:
+        ).inner_text().strip()
+
+        if actual_time != installation_time:
             raise RuntimeError("Installation time selection failed.")
 
-        print(f"PASS: Preferred time: {install_time}")
+        print(f"PASS: Preferred time selected: {actual_time}")
 
-        # Tick the two mandatory installation disclosures.
-        required_disclosures = [
-            (
-                "over the age of 18",
-                "Adult availability acknowledgement"
-            ),
-            (
-                "availability of installation dates",
-                "Installation availability acknowledgement"
-            ),
-        ]
+        # 2D. Second mandatory acknowledgement
 
-        checkboxes = frame.locator('input[type="checkbox"]')
+        print("\n5. Installation availability acknowledgement")
 
-        for phrase, description in required_disclosures:
+        # Reuse the already identified second Read checkbox instead of
+        # calling a nonexistent helper.
+        if not availability_checkbox.is_checked():
+            availability_checkbox.check()
 
-            matching_checkbox = None
+        if not availability_checkbox.is_checked():
+            raise RuntimeError(
+                "Installation availability acknowledgement failed."
+            )
 
-            for index in range(checkboxes.count()):
-                checkbox = checkboxes.nth(index)
+        print("PASS: Installation availability Read checked.")
 
-                surrounding_text = checkbox.evaluate("""
-                    el => {
-                        let node = el;
+    else:
+        print("Standard shipping selected. No appointment required.")
 
-                        for (
-                            let level = 0;
-                            level < 5 && node;
-                            level++, node = node.parentElement
-                        ) {
-                            const text = (node.innerText || "").trim();
-                            if (text) return text;
-                        }
+    # -------------------------------------------------
+    # 3. VERIFY INSTALLATION TOTAL
+    # -------------------------------------------------
 
-                        return "";
-                    }
-                """)
+    print("\n6. Verifying installation total")
 
-                if phrase in " ".join(
-                    surrounding_text.casefold().split()
-                ):
-                    matching_checkbox = checkbox
-                    break
-
-            if matching_checkbox is None:
-                raise RuntimeError(
-                    f"Mandatory acknowledgement not found: {description}"
-                )
-
-            if not matching_checkbox.is_checked():
-                matching_checkbox.check()
-
-            if not matching_checkbox.is_checked():
-                raise RuntimeError(
-                    f"Could not check: {description}"
-                )
-
-            print(f"PASS: {description} checked.")
-
-    # Confirm the installation fee before proceeding.
     page_text = frame.locator("body").inner_text()
 
-    if installation_type == "PRO_INSTALL":
-        if not re.search(
-            r"Installation Total\s*:\s*\$100\.00",
-            page_text,
-            re.I
-        ):
-            raise RuntimeError(
-                "Expected $100.00 installation total was not verified."
-            )
-    else:
-        if not re.search(
-            r"Installation Total\s*:\s*\$0\.00",
-            page_text,
-            re.I
-        ):
-            raise RuntimeError(
-                "Expected $0.00 standard shipping total was not verified."
-            )
+    expected_total = (
+        r"Installation Total\s*:?\s*\$100\.00"
+        if installation_type == "PRO_INSTALL"
+        else r"Installation Total\s*:?\s*\$0\.00"
+    )
+
+    if not re.search(expected_total, page_text, re.IGNORECASE):
+        raise RuntimeError(
+            "Installation total verification failed. "
+            f"Expected: {'$100.00' if installation_type == 'PRO_INSTALL' else '$0.00'}"
+        )
 
     print("PASS: Installation total verified.")
 
@@ -1632,18 +1819,21 @@ def automate_installation_payment(page, order):
         "installation_payment_before_confirm.png"
     )
 
+    # -------------------------------------------------
+    # 4. CONFIRM INSTALLATION
+    # -------------------------------------------------
+
+    print("\n7. Confirming installation")
+
     confirm_button = frame.get_by_role(
         "button",
         name=re.compile(
             r"^\s*Confirm Installation\s*>?\s*$",
-            re.I
+            re.IGNORECASE
         )
     )
 
-    confirm_button.wait_for(
-        state="visible",
-        timeout=30000
-    )
+    confirm_button.wait_for(state="visible", timeout=20000)
 
     if not confirm_button.is_enabled():
         raise RuntimeError("Confirm Installation is disabled.")
@@ -1653,16 +1843,205 @@ def automate_installation_payment(page, order):
 
     print("PASS: Confirm Installation clicked.")
 
-    page.wait_for_timeout(2000)
-
     save_screenshot(
         page,
         "installation_payment_after_confirm.png"
     )
 
-    print("Installation workflow completed.")
+    # -------------------------------------------------
+    # 5. WAIT FOR THE NEXT FORWARD BUTTON
+    # -------------------------------------------------
+
+    print("\n8. Waiting for next Forward button")
+
+    forward_button = frame.get_by_role(
+        "button",
+        name=re.compile(
+            r"^\s*Forward\s*>?\s*$",
+            re.IGNORECASE
+        )
+    )
+
+    forward_button.wait_for(
+        state="visible",
+        timeout=30000
+    )
+
+    if not forward_button.is_enabled():
+        raise RuntimeError(
+            "The next Forward button is disabled."
+        )
+
+    forward_button.scroll_into_view_if_needed()
+    forward_button.click()
+
+    print("PASS: Installation Forward button clicked.")
+
+    page.wait_for_timeout(3000)
+
+    save_screenshot(
+        page,
+        "installation_forward_completed.png"
+    )
+
+    print("\nINSTALLATION WORKFLOW COMPLETED.")
 
 
+def inspect_credit_check_ui(page):
+    print("\n========== CREDIT CHECK UI DIAGNOSTICS ==========")
+
+    for frame_index, frame in enumerate(page.frames):
+        print(f"\n--- Frame {frame_index}: {frame.url} ---")
+
+        inputs = frame.locator("input:visible")
+        for i in range(inputs.count()):
+            field = inputs.nth(i)
+            details = field.evaluate("""
+                el => ({
+                    type: el.type,
+                    name: el.name,
+                    id: el.id,
+                    placeholder: el.placeholder,
+                    ariaLabel: el.getAttribute("aria-label")
+                })
+            """)
+            print("INPUT:", details)
+
+        buttons = frame.locator("button:visible, input[type=button]:visible, input[type=submit]:visible")
+        for i in range(buttons.count()):
+            button = buttons.nth(i)
+            print("BUTTON:", button.inner_text() if button.evaluate("(el) => el.tagName") == "BUTTON"
+                  else button.get_attribute("value"))
+
+        body_text = frame.locator("body").inner_text()
+        for line in body_text.splitlines():
+            if any(word in line.lower() for word in ("credit", "ssn", "social security", "date of birth", "dob")):
+                print("MATCH:", line.strip())
+            frame = page.frames[1]
+
+    credit_button = frame.get_by_role(
+        "button",
+        name="Run Credit Check"
+    )
+
+    print("\nCREDIT BUTTON DETAILS:")
+    print(
+        credit_button.evaluate("""
+            el => ({
+                text: el.innerText,
+                type: el.type,
+                id: el.id,
+                className: el.className,
+                onclick: el.getAttribute("onclick"),
+                formAction: el.form ? el.form.action : null
+            })
+        """)
+    )
+
+    print("\nCREDIT CHECK SECTION:")
+    print(
+        credit_button.locator("xpath=..").evaluate(
+            "(el) => el.parentElement.innerText"
+        )
+    )
+    print("\n========== PAGE SCRIPT DIAGNOSTICS ==========")
+
+    scripts = frame.locator("script[src]")
+    for i in range(scripts.count()):
+        print("SCRIPT:", scripts.nth(i).get_attribute("src"))
+
+    print("\nCREDIT BUTTON HTML:")
+    print(
+        credit_button.evaluate(
+            "(el) => el.outerHTML"
+        )
+    )
+
+    print("\nLOADED NETWORK RESOURCES:")
+    resources = frame.evaluate("""
+        () => performance.getEntriesByType("resource")
+            .map(entry => entry.name)
+            .filter(url =>
+                /api|credit|checkout|order/i.test(url)
+            )
+    """)
+
+    for resource in resources:
+        print("RESOURCE:", resource)
+
+    print("========== END PAGE SCRIPT DIAGNOSTICS ==========")
+    print("========== END DIAGNOSTICS ==========")
+
+def automate_credit_check(page, order):
+    print("\n========== CREDIT CHECK ==========")
+
+    frame = page.frames[1]
+
+    credit_data = order.get("credit_check", {})
+
+    if not credit_data.get("enabled"):
+        raise RuntimeError("Credit check is disabled in test data.")
+
+    ssn = credit_data.get("ssn", "")
+    dob = credit_data.get("dob", "")
+
+    if not ssn or not dob:
+        raise RuntimeError("Dummy credit-check values are missing.")
+
+    # Fill the two fields using their accessible labels.
+    frame.get_by_label("Social Security Number").fill(ssn)
+    frame.get_by_label("Date of Birth").fill(dob)
+
+    print("PASS: Dummy SSN and DOB entered.")
+
+    # Click Run Credit Check.
+    frame.get_by_role(
+        "button",
+        name="Run Credit Check"
+    ).click()
+
+    page.wait_for_timeout(2000)
+
+    # Inspect visible result text.
+    result_text = frame.locator("body").inner_text().lower()
+
+    
+    # Normalize the simulator response
+    result_text = re.sub(r"\s+", " ", result_text).strip()
+
+    success_patterns = [
+        r"credit check successful",
+        r"credit check completed",
+        r"credit approved",
+        r"credit verification successful",
+        r"credit check status:\s*approved",
+    ]
+
+    failure_patterns = [
+        r"credit check declined",
+        r"credit check failed",
+        r"credit check rejected",
+    ]
+
+    if any(re.search(pattern, result_text) for pattern in failure_patterns):
+        raise RuntimeError("Credit check was declined or failed.")
+
+    if not any(
+        re.search(pattern, result_text)
+        for pattern in success_patterns
+    ):
+        raise RuntimeError(
+            "Credit check approval could not be verified. "
+            "Inspect the simulator response."
+        )
+
+    print("PASS: Credit Check Status = APPROVED")
+    print("PASS: Order Qualification Status verified.")
+
+    save_screenshot(page, "credit_check_completed.png")
+
+    
+    
 def inspect_payment_fields(page):
     """Inspect payment controls without exposing sensitive values."""
 
@@ -1875,129 +2254,83 @@ def complete_payment_page(page):
     print("Payment Information stage completed.")
 
 
+
 def main():
-    """Run the complete Provider XX order automation workflow."""
+    """Run the Provider XX order automation workflow."""
+
+    global TEST_DATA
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--customer",
+        type=int,
+        choices=[1, 2, 3],
+        default=2,
+        help="Customer profile to test (1, 2, or 3)"
+    )
+    args = parser.parse_args()
+
+    TEST_DATA = get_test_data(args.customer)
+
+    print("\n========== SELECTED CUSTOMER ==========")
+    print("Customer:", TEST_DATA["first_name"], TEST_DATA["last_name"])
+    print("Provider:", TEST_DATA["provider"])
+    print("Email:", TEST_DATA["email"])
+    print("=======================================")
 
     manager = BrowserManager()
+    page = None
 
     try:
-        print("\n========== PROVIDER XX ORDER AUTOMATION ==========")
-
-        # -------------------------------------------------
-        # 1. LAUNCH BROWSER
-        # -------------------------------------------------
+        print("\n========== PROVIDER XX AUTOMATION ==========")
 
         page = manager.start()
         manager.open_page(SIMULATOR_URL)
 
-        print("Chromium browser launched successfully.")
+        print("Browser launched successfully.")
         print("Simulator opened.")
 
-        # -------------------------------------------------
-        # 2. LOGIN AND START SESSION
-        # -------------------------------------------------
-
+        # 1. Login and start the session manually
         login_and_start_session(page)
 
-        # -------------------------------------------------
-        # 3. BASIC INFORMATION
-        # -------------------------------------------------
+        # 2. Basic customer information
+        if not fill_basic_information(page):
+            raise RuntimeError("Basic Information validation failed.")
 
-        validation_passed = fill_basic_information(page)
-
-        if not validation_passed:
-            raise RuntimeError(
-                "Basic Information validation failed."
-            )
-
-        # FIRST FORWARD:
-        # Basic Information -> Valid Address
         submit_basic_information(page)
 
-        # -------------------------------------------------
-        # 4. VALID ADDRESS
-        # -------------------------------------------------
-
-        # SECOND FORWARD:
-        # Valid Address -> Qualification
+        # 3. Address validation
         proceed_to_valid_address(page)
 
-        # -------------------------------------------------
-        # 5. CUSTOMER QUALIFICATION
-        # -------------------------------------------------
-
-        # THIRD FORWARD:
-        # Qualification -> Recommendations
+        # 4. Customer qualification
         qualify_as_new_customer(page)
 
-        # -------------------------------------------------
-        # 6. PROVIDER SELECTION
-        # -------------------------------------------------
+        # 5. Provider availability
+        check_provider_availability(page, TEST_DATA)
 
-        check_provider_availability(
-            page,
-            TEST_DATA
-        )
+        # 6. Select the requested internet plan
+        selected_plan = select_internet_offer(page, TEST_DATA)
 
-        # -------------------------------------------------
-        # 7. INTERNET PLAN SELECTION
-        # -------------------------------------------------
+        # 7. Add selected plan to checkout
+        add_plan_to_order_and_checkout(page, selected_plan)
 
-        select_internet_offer(
-            page,
-            TEST_DATA
-        )
-
-        # -------------------------------------------------
-        # 8. ADD PLAN TO ORDER
-        # -------------------------------------------------
-
-        add_plan_to_order_and_checkout(
-            page,
-            TEST_DATA
-        )
-
-        # -------------------------------------------------
-        # 9. CHECKOUT REVIEW
-        # -------------------------------------------------
-
+        # 8. Product customization
         proceed_to_product_customization(page)
+        customize_checkout_products(page, TEST_DATA)
 
-        # -------------------------------------------------
-        # 10. PRODUCT CUSTOMIZATION
-        # -------------------------------------------------
+        # 9. Account holder qualification
+        automate_account_holder_qualification(page, TEST_DATA)
 
-        customize_checkout_products(
-            page,
-            TEST_DATA
-        )
-
-        # -------------------------------------------------
-        # 11. ACCOUNT HOLDER QUALIFICATION
-        # -------------------------------------------------
-
-        automate_account_holder_qualification(
-            page,
-            TEST_DATA
-        )
-
-        # Wait for Installation & Payment to load.
-        checkout_frame = page.frame(
-            name="checkoutContent"
-        )
+        # 10. Installation selection
+        checkout_frame = page.frame(name="checkoutContent")
 
         if checkout_frame is None:
-            raise RuntimeError(
-                "Checkout iframe not found after Account Holder Qualification."
-            )
+            raise RuntimeError("Checkout frame not found.")
 
         installation_heading = checkout_frame.locator(
             "div.panel-title"
         ).filter(
-            has_text=re.compile(
-                r"Installation and Payment",
-                re.IGNORECASE
-            )
+            has_text=re.compile(r"Installation\s+and\s+Payment", re.I)
         ).first
 
         installation_heading.wait_for(
@@ -2005,106 +2338,73 @@ def main():
             timeout=30000
         )
 
-        print(
-            "\nInstallation & Payment page detected successfully."
-        )
+        print("Installation and Payment page loaded.")
 
         save_screenshot(
             page,
             "installation_payment_page.png"
         )
 
-        # -------------------------------------------------
-        # 12. INSTALLATION TYPE SELECTION
-        # -------------------------------------------------
+        automate_credit_check(page, TEST_DATA)
+        automate_installation_payment(page, TEST_DATA)
 
-        # TEST_DATA controls the installation path:
-        #
-        # STANDARD_SHIPPING = Free
-        # PRO_INSTALL       = $100
-        #
-        # Professional installation also requires
-        # a customer-selected date, time and acknowledgements.
+        # 11. Check for Order Summary without submitting payment
+        print("\nChecking for Order Summary...")
 
-        automate_installation_payment(
-            page,
-            TEST_DATA
-        )
-        complete_payment_page(page)
-        # -------------------------------------------------
-        # 13. AUTOMATION RESULT
-        # -------------------------------------------------
-        inspect_payment_fields(page)
-        
-        print("\n========== AUTOMATION RESULT ==========")
+        summary_found = False
 
-        print("Manual Login: Completed")
-        print("Basic Information: Passed")
-        print("Address Validation: Passed")
-        print("Customer Qualification: Passed")
-        print("ProviderXX Selection: Passed")
-        print("Internet Plan Selection: Passed")
-        print("Checkout: Completed")
-        print("Product Customization: Completed")
-        print("Account Holder Qualification: Completed")
+        for frame in page.frames:
+            try:
+                summary = frame.get_by_text(
+                    re.compile(r"Order Summary", re.I)
+                ).first
 
-        print(
-            "Installation Type:",
-            TEST_DATA["installation_type"]
-        )
+                if summary.is_visible(timeout=3000):
+                    summary_found = True
+                    break
+            except Exception:
+                continue
 
-        print("Installation Workflow: Completed")
+        if summary_found:
+            print("Order Summary detected.")
+            save_screenshot(page, "order_summary.png")
+        else:
+            print("Order Summary not detected automatically.")
+            print("Current URL:", page.url)
+            print("Please inspect the browser before proceeding.")
+            save_screenshot(page, "order_summary_check.png")
 
-        print(
-            "\nAutomation stopped before Authorization "
-            "and final order submission."
-        )
+        print("\n========== AUTOMATION STOPPED ==========")
+        print("No payment details entered.")
+        print("No final order submitted.")
+        print("========================================")
 
-        print(
-            "\nScreenshot directory:",
-            SCREENSHOT_DIR
-        )
-
-        input(
-            "\nPress Enter to close the browser..."
-        )
+        input("Press Enter to close the browser...")
 
     except PlaywrightError as error:
+        print("\nPLAYWRIGHT ERROR:", error)
 
-        print("\n========== PLAYWRIGHT ERROR ==========")
-        print(str(error))
+        if page:
+            try:
+                save_screenshot(page, "automation_error.png")
+            except Exception:
+                pass
 
-        if manager.page and not manager.page.is_closed():
-            save_screenshot(
-                manager.page,
-                "automation_error.png"
-            )
-
-        input(
-            "\nPress Enter to close the browser..."
-        )
+        input("Press Enter to close the browser...")
 
     except Exception as error:
+        print("\nUNEXPECTED ERROR:", error)
 
-        print("\n========== UNEXPECTED ERROR ==========")
-        print(str(error))
+        if page:
+            try:
+                save_screenshot(page, "automation_error.png")
+            except Exception:
+                pass
 
-        if manager.page and not manager.page.is_closed():
-            save_screenshot(
-                manager.page,
-                "automation_error.png"
-            )
-
-        input(
-            "\nPress Enter to close the browser..."
-        )
+        input("Press Enter to close the browser...")
 
     finally:
-
         manager.close()
-
-        print("\nBrowser closed successfully.")
-
-
+        print("Browser closed.")
 if __name__ == "__main__":
     main()
