@@ -157,10 +157,7 @@ def collect_encrypt_upload_payment():
 
 
 # Keep the original working simulator URL unchanged.
-SIMULATOR_URL = (
-    "https://lemon-forest-0915c3c1e.6.azurestaticapps.net/"
-    "?next=%2Fallconnect%2F"
-)
+SIMULATOR_URL = ("")
 
 from tests.test_data import get_test_data
 
