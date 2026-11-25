@@ -33,3 +33,6 @@ playwright-report/
 *.db
 *.db-shm
 *.db-wal
+keys/server_private.pem
+.env
+*.secret.json
